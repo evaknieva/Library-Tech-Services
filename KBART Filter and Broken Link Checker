@@ -23,21 +23,17 @@ drive.mount('/content/drive')
 import os
 
 # Path to your KBART file in Drive
-KBART_PATH = '/content/drive/MyDrive/KBART_01152026.txt'
+KBART_PATH = '/content/drive/MyDrive/KBART.txt' ##Make sure your KBART is uploaded to drive and insert your filename here##
 
 # Where to save the output
 OUTPUT_PATH = '/content/drive/MyDrive/KBART_filtered_link_checked.xlsx'
 
 # Collections to keep (column U = oclc_collection_name)
 TARGET_COLLECTIONS = [
-    'National Academies Press open access monographs',
-    'Freely Accessible Science Journals',
-    'WVU Open Access',
-    'WVU Latindex',
-    'WVU Freely Accessible Journals',
-    'WVU Free Medical Journals',
-    'WVU Free Full-Text Journals in Chemistry'
-    'Directory of Open Access Journals (All titles)',
+    ##'uncomment and insert an oclc_collection_name here'##,
+    ##'uncomment and insert another oclc_collection_name here'##,
+    ##'uncomment and so on'##,
+   
 ]
 
 # Link-checker tuning
