@@ -1,0 +1,275 @@
+# ============================================================
+# KBART Random Article Sampler
+# For use in Google Colab
+# ============================================================
+# This script:
+#   1. Loads a KBART file from Google Drive
+#   2. Filters to fulltext journals with valid ISSNs and start dates
+#   3. Normalizes messy date formats
+#   4. Randomly samples 500 journals
+#   5. Queries Crossref for a random article title and DOI per journal
+#   6. Exports results to a CSV in Google Drive
+# ============================================================
+
+
+# ── STEP 1: Install dependencies ────────────────────────────
+# Habanero is a Python wrapper for the Crossref API.
+
+!pip install habanero
+# ── STEP 2: Imports & configuration ─────────────────────────
+
+import calendar
+import random
+import re
+import time
+from datetime import date, datetime
+
+import pandas as pd
+from habanero import Crossref
+from google.colab import drive
+
+# Mount Google Drive
+drive.mount('/content/drive')
+
+# ── Configuration ────────────────────────────────────────────
+# Update this path if your file lives in a subfolder of My Drive
+KBART_PATH    = '/content/drive/My Drive/Current_kbart_05042026.txt'
+OUTPUT_PATH   = f'/content/drive/My Drive/random_articles_output_{date.today().strftime("%m%d%Y")}.csv'
+TARGET_COUNT  = 500   # Number of article DOIs to collect
+CROSSREF_ROWS = 50    # How many results to fetch per Crossref query (we pick 1 at random)
+MAILTO        = ''    # Optional but recommended: add your email so Crossref gives you the polite pool
+              #   e.g. MAILTO = 'yourname@yourlibrary.edu'
+# ── STEP 3: Date normalization helpers ───────────────────────
+
+def last_day_of_month(year: int, month: int) -> int:
+    """Return the last calendar day of a given month."""
+    return calendar.monthrange(year, month)[1]
+
+
+def normalize_date(raw: str, is_start: bool) -> date | None:
+    """
+    Parse a messy KBART date string into a Python date object.
+
+    Rules:
+      yyyy            → Jan 1 (start) or Dec 31 (end)
+      yyyy-mm         → mm/01 (start) or mm/last-day (end)
+      yyyy-mm-dd      → use as-is
+      slashes instead of dashes are handled transparently
+      blank / null    → None (caller decides what to do with None)
+
+    Args:
+        raw:      The raw string from the KBART STEP.
+        is_start: True if this is a coverage-start date, False for end.
+
+    Returns:
+        A date object, or None if the input was blank.
+    """
+    if pd.isna(raw) or str(raw).strip() == '':
+        return None
+
+    # Normalise separators: replace slashes with dashes
+    cleaned = str(raw).strip().replace('/', '-')
+
+    # yyyy only
+    if re.fullmatch(r'\d{4}', cleaned):
+        year = int(cleaned)
+        if is_start:
+            return date(year, 1, 1)
+        else:
+            return date(year, 12, 31)
+
+    # yyyy-mm
+    if re.fullmatch(r'\d{4}-\d{2}', cleaned):
+        year, month = int(cleaned[:4]), int(cleaned[5:7])
+        if is_start:
+            return date(year, month, 1)
+        else:
+            return date(year, month, last_day_of_month(year, month))
+
+    # yyyy-mm-dd
+    if re.fullmatch(r'\d{4}-\d{2}-\d{2}', cleaned):
+        try:
+            return datetime.strptime(cleaned, '%Y-%m-%d').date()
+        except ValueError:
+            return None
+
+    # Skip unrecognized formats
+    print(f"  [warn] Unrecognised date format, skipping: '{raw}'")
+    return None
+# ── STEP 4: Load & prepare KBART data ───────────────────────
+
+print("Loading KBART file...")
+kbart = pd.read_csv(KBART_PATH, sep='\t', dtype=str, low_memory=False)
+
+print(f"  Total rows loaded: {len(kbart)}")
+
+# Filter to fulltext coverage only
+kbart = kbart[kbart['coverage_depth'].str.strip().str.lower() == 'fulltext'].copy()
+print(f"  Rows after fulltext filter: {len(kbart)}")
+
+# Drop rows with no ISSN in either identifier column
+before_issn = len(kbart)
+kbart = kbart[kbart['print_identifier'].notna() | kbart['online_identifier'].notna()].copy()
+print(f"  Rows after dropping missing ISSNs: {len(kbart)} (dropped {before_issn - len(kbart)})")
+
+# Normalise date columns
+kbart['start_date'] = kbart['date_first_issue_online'].apply(
+    lambda x: normalize_date(x, is_start=True)
+)
+kbart['end_date'] = kbart['date_last_issue_online'].apply(
+    lambda x: normalize_date(x, is_start=False)
+)
+
+# Blank end date → today
+today = date.today()
+kbart['end_date'] = kbart['end_date'].apply(lambda d: d if d is not None else today)
+
+# Drop rows with no start date
+before = len(kbart)
+kbart = kbart[kbart['start_date'].notna()].copy()
+print(f"  Rows after dropping blank start dates: {len(kbart)} (dropped {before - len(kbart)})")
+
+# Reset index for clean sampling
+kbart = kbart.reset_index(drop=True)
+print(f"\nReady to sample from {len(kbart)} fulltext journals.")
+# ── STEP 5: Crossref query helper ────────────────────────────
+
+from datetime import timedelta
+
+cr = Crossref(mailto=MAILTO if MAILTO else None)
+
+
+def random_date_in_range(start: date, end: date) -> date:
+    """Pick a uniformly random date between start and end (inclusive)."""
+    delta = (end - start).days
+    if delta <= 0:
+        return start
+    return start + timedelta(days=random.randint(0, delta))
+
+
+def get_random_article(row: pd.Series) -> dict | None:
+    """
+    Query Crossref for a random article within a journal's coverage window.
+
+    Strategy:
+      - Pick a random date in the coverage range
+      - Query Crossref for articles published on or after that date, within the coverage window
+      - Pick one article at random from the results
+      - Return doi, article_title, and article_date, or None if nothing found.
+    """
+    online   = row.get('online_identifier', '')
+    print_id = row.get('print_identifier', '')
+    issn     = ('' if pd.isna(online) else str(online).strip()) or \
+               ('' if pd.isna(print_id) else str(print_id).strip())
+    start    = row['start_date']
+    end      = row['end_date']
+
+    if not issn or issn.lower() in ('', 'nan'):
+        return None
+
+    # Pick a random date within the coverage window
+    pivot = random_date_in_range(start, end)
+
+    def query_crossref(from_date: date, to_date: date) -> list:
+        try:
+            result = cr.works(
+                filter={
+                    'issn':           issn,
+                    'from-pub-date':  from_date.strftime('%Y-%m-%d'),
+                    'until-pub-date': to_date.strftime('%Y-%m-%d'),
+                    'type':           'journal-article',
+                },
+                limit=CROSSREF_ROWS,
+                select='DOI,published,title',
+            )
+            items = result['message'].get('items', [])
+            return [i for i in items if i.get('DOI')]
+        except Exception as e:
+            print(f"    [crossref error] ISSN {issn}: {e}")
+            return []
+
+    # First attempt: from random pivot date to end of coverage
+    articles = query_crossref(pivot, end)
+
+    # Fallback: full coverage range
+    if not articles:
+        articles = query_crossref(start, end)
+
+    if not articles:
+        return None
+
+    chosen = random.choice(articles)
+    doi    = chosen.get('DOI', '')
+    title  = chosen.get('title', [''])[0]
+
+    # Parse article date
+    pub    = chosen.get('published', {})
+    parts  = pub.get('date-parts', [[None]])[0]
+    try:
+        article_date = date(parts[0], parts[1] if len(parts) > 1 else 1,
+                            parts[2] if len(parts) > 2 else 1)
+    except (TypeError, ValueError):
+        article_date = None
+
+    return {'doi': doi, 'article_title': title, 'article_date': article_date}
+# ── STEP 6: Sample journals & collect DOIs ──────────────────
+
+print(f"\nCollecting {TARGET_COUNT} article DOIs. This may take a while...\n")
+
+results       = []
+journal_pool  = list(kbart.index)         # All eligible row indices
+random.shuffle(journal_pool)              # Shuffle so we draw without bias
+pool_position = 0                         # Pointer into the shuffled pool
+attempts      = 0
+max_attempts  = TARGET_COUNT * 5          # Safety cap to avoid infinite loops
+
+while len(results) < TARGET_COUNT and attempts < max_attempts:
+
+    # If we've exhausted the pool once, reshuffle and start over
+    # (allows reaching 500 even if fewer than 500 journals exist)
+    if pool_position >= len(journal_pool):
+        print("  [info] Reshuffling journal pool for another pass...")
+        random.shuffle(journal_pool)
+        pool_position = 0
+
+    idx = journal_pool[pool_position]
+    pool_position += 1
+    attempts += 1
+
+    row        = kbart.loc[idx]
+    title      = row.get('publication_title', 'Unknown')
+    online     = row.get('online_identifier', '')
+    print_id   = row.get('print_identifier', '')
+    issn       = ('' if pd.isna(online) else str(online).strip()) or \
+             ('' if pd.isna(print_id) else str(print_id).strip())
+
+    print(f"  [{len(results)+1}/{TARGET_COUNT}] Querying: {title[:60]}  (ISSN: {issn})")
+
+    article = get_random_article(row)
+
+    if article:
+     results.append({
+     'journal_title':        title,
+     'issn':                 issn,
+     'oclc_collection_name': row.get('oclc_collection_name', ''),
+     'coverage_start':       row['start_date'],
+     'coverage_end':         row['end_date'],
+     'article_date':         article['article_date'],
+     'article_title':        article['article_title'],
+     'article_doi':          article['doi'],
+})
+    
+    else:
+        print(f"    [skip] No results found for this journal.")
+
+    # Be polite to Crossref — small pause between requests
+    time.sleep(0.5)
+
+print(f"\nDone. Collected {len(results)} DOIs from {attempts} attempts.")
+ ── STEP 7: Export to CSV ────────────────────────────────────
+
+output_df = pd.DataFrame(results)
+output_df.to_csv(OUTPUT_PATH, index=False)
+
+print(f"\nResults saved to: {OUTPUT_PATH}")
+print(output_df.head(10).to_string(index=False))
