@@ -1,6 +1,7 @@
 # ============================================================
 # KBART Random Article Sampler
 # For use in Google Colab
+# KBART file should be uploaded in Google Drive and path updated in STEP 1 Configuration
 # ============================================================
 # This script:
 #   1. Loads a KBART file from Google Drive
@@ -33,7 +34,7 @@ drive.mount('/content/drive')
 
 # ── Configuration ────────────────────────────────────────────
 # Update this path if your file lives in a subfolder of My Drive
-KBART_PATH    = '/content/drive/My Drive/Current_kbart_05042026.txt'
+KBART_PATH    = '/content/drive/My Drive/Current_kbart_05042026.txt' #change this path as necessary
 OUTPUT_PATH   = f'/content/drive/My Drive/random_articles_output_{date.today().strftime("%m%d%Y")}.csv'
 TARGET_COUNT  = 500   # Number of article DOIs to collect
 CROSSREF_ROWS = 50    # How many results to fetch per Crossref query (we pick 1 at random)
