@@ -2,6 +2,7 @@
 # KBART Random Article Sampler
 # For use in Google Colab
 # KBART file should be uploaded in Google Drive and path updated in STEP 1 Configuration
+# I run this program quarterly and give the output to student workers. They search each DOI in our catalog and log whether it is accessible or not. The electronic resources staff then goes through to correct the causal errors.
 # ============================================================
 # This script:
 #   1. Loads a KBART file from Google Drive
